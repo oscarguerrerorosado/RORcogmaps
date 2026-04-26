@@ -88,7 +88,6 @@ class Conv_AE(nn.Module):
         x = F.relu(self.conv3(x))  
         x = x.view(-1, 64 * self.dim1 * self.dim2)  
         x = F.relu(self.fc1(x))
-        #x = F.leaky_relu(self.fc1(x), negative_slope=0.001) #TESTING
         
         return x
 
@@ -136,74 +135,7 @@ class Conv_AE(nn.Module):
         return recon_loss.item()
 
 
-    def MAS_backward(self, optimizer, criterion, x, y_true,
-                     C_factor, alpha,
-                     omega=None, theta_star=None, lambda_mas=1.0):
-        """
-        One training step that combines
-            1) pixel-reconstruction loss,
-            2) sparse-whitening loss (DG-like regulariser), and
-            3) MAS quadratic penalty that protects previously important weights.
-
-        Parameters
-        ----------
-        optimizer      : torch.optim.Optimizer
-                         The optimiser already connected to model parameters.
-        criterion      : callable
-                         Reconstruction loss, e.g. nn.MSELoss().
-        x, y_true      : tensors (B, C, H, W)
-                         Mini-batch input images (and targets, identical for AE).
-        C_factor       : float
-                         Multiplier inside the whitening matrix (your ‘I − M’ term).
-        alpha          : float
-                         Strength of the whitening (sparsity) penalty.
-        omega          : dict {name : tensor}, optional
-                         MAS importance scores Ω_i computed during pre-training.
-        theta_star     : dict {name : tensor}, optional
-                         Frozen reference weights θ★ from the same epoch in which
-                         Ω was measured.
-        lambda_mas     : float
-                         Weight of the MAS penalty in the total loss.
-
-        Returns
-        -------
-        recon_loss.item()  — scalar reconstruction loss for logging.
-        """
-
-        # -------- 0. Clear old gradients ---------------------------------------
-        optimizer.zero_grad()
-
-        # -------- 1. Forward pass ---------------------------------------------
-        y_pred, hidden = self.forward(x)
-        recon_loss = criterion(y_pred, y_true)       # pixel MSE
-
-        # -------- 2. Whitening / sparsity penalty -----------------------------
-        #   hidden: shape (B, n_hidden)
-        #   M     : batch scatter (B × B) — encourages pairwise orthogonality
-        M = torch.mm(hidden.t(), hidden)             # (n_hidden × n_hidden)
-        I = torch.eye(hidden.size(1), device=hidden.device)
-        whiten_loss = alpha * torch.norm(C_factor * I - M) \
-                                / (x.size(0) * hidden.size(1))
-
-        # running total
-        loss = recon_loss + whiten_loss
-
-        # -------- 3. Memory-Aware Synapses penalty ----------------------------
-        if omega is not None and theta_star is not None:
-            # Accumulate λ · Σ Ω_i (θ_i − θ★_i)²  over all parameters
-            mas_loss = 0.0
-            for n, p in self.named_parameters():
-                mas_loss += (omega[n] * (p - theta_star[n]).pow(2)).sum()
-                
-            loss += lambda_mas * mas_loss
-
-        # -------- 4. Back-prop + weight update --------------------------------
-        loss.backward()
-        optimizer.step()
-
-        # Return just the reconstruction part for easy monitoring
-        return recon_loss.item()
-
+    
 
 
 def create_dataloader(dataset, batch_size=256, reshuffle_after_epoch=True):
@@ -266,119 +198,6 @@ def train_autoencoder(model, train_loader, C_factor,  dataset=[], num_epochs=100
     return history, embeddings
 
 
-def compute_mas_importance(model, loader):
-    model.to('cuda')
-    model.eval()
-    omega = {n: torch.zeros_like(p) for n, p in model.named_parameters()} # Initialise Ω with zeros, one tensor per parameter
-    N = 0
-    for x,_ in loader:
-        x = x.cuda() # Batch of images
-        model.zero_grad(set_to_none=True)     # clear old gradients
-
-        # forward -> latent
-        h = model.encoder(x)                  # shape = (Batch_size, n_hidden) 
-        
-        loss_probe = (h ** 2).sum(dim=1).mean() # probe value (scalar) = ||h||² averaged over batch.
-                                                # A simple scalar function of the network’s response to an input.
-                                                # It is used to probe how sensitive each weight is.
-                                                # A single number for every input image x that depends on the network parameters (so gradients exist).
-
-        loss_probe.backward()                 # Compute ∂f / ∂θ.
-                                              # Instead of backpropagating the loss, we backpropagate the gradient of the probe value.
-                                              # It traces the computation graph that produced loss_probe and computes gradients.
-                                              # For every parameter that influenced this scalar, it computes the gradient and stores it in p.grad.
-        
-        for n, p in model.named_parameters():
-            if p.grad is not None:
-                omega[n] += p.grad.abs() * x.size(0)   # sum over samples - magnitude of the sensitivity accumulated batch by batch.
-        N += x.size(0) # N = batch_size * n_batches = total_images 
-        
-
-    # final importance = average |gradient|
-    for n in omega:
-        omega[n] /= N
-    return omega
-
-
-def train_autoencoder_MAS(model, train_loader, C_factor,
-                      dataset       = [],         # optional probe-set for monitoring latent drift
-                      num_epochs    = 1000,
-                      learning_rate = 1e-4,
-                      alpha         = 2e3,
-                      omega=None, update_omega=False, theta_star=None, lambda_mas=1.0):
-    """
-    One full Phase-I or Phase-II training loop.
-
-    Parameters
-    ----------
-    model        : Conv_AE            — auto-encoder to be trained.
-    train_loader : DataLoader        — supplies mini-batches of input frames.
-    C_factor     : float             — scales the (I − M) whitening matrix.
-    dataset      : np.ndarray, opt.  — if provided, latent vectors are
-                                       sampled after each epoch for analysis.
-    num_epochs   : int               — number of passes through train_loader.
-    learning_rate: float             — Adam step size.
-    alpha        : float             — weight of the whitening penalty.
-
-    Notes
-    -----
-    * The function assumes that global variables
-        `omega`       — importance scores Ω_i
-        `theta_star`  — reference weights θ★
-      are already defined.  These come from `compute_mas_importance`.
-    * Calls `MAS_backward` (commented earlier) for each mini-batch.
-    * Returns a list of reconstruction losses (“history”) and an
-      optional tensor of latent embeddings over epochs.
-    """
-
-    # -------- 0. Setup optimiser and loss -------------------------------
-    optimizer = optim.Adam(model.parameters(), lr=learning_rate)
-    criterion = nn.MSELoss()
-    model     = model.cuda()
-
-    history    = []   # per-epoch reconstruction loss
-    embeddings = []   # latent snapshots (optional)
-
-    # Store initial latent vectors if a monitoring set is given
-    if len(dataset) > 0:
-        embeddings.append(get_latent_vectors(dataset=dataset, model=model))
-
-    # Update omega
-    if update_omega == True:
-        omega = compute_mas_importance(model, train_loader)
-
-    # -------- 1. Epoch loop ---------------------------------------------
-    for epoch in range(num_epochs):
-        running_loss = 0.0
-
-        # tqdm progress-bar for nice console output
-        with tqdm(total=len(train_loader)) as pbar:
-            for inputs, _ in train_loader:
-                inputs = inputs.cuda()
-
-                # one MAS-aware gradient step
-                loss = model.MAS_backward(optimizer=optimizer,
-                                    criterion=criterion,
-                                    x=inputs, y_true=inputs,
-                                    alpha=alpha, C_factor=C_factor,
-                                    omega=omega, theta_star=theta_star,
-                                    lambda_mas=lambda_mas)
-
-                running_loss += loss
-                pbar.update(1)
-                pbar.set_description(f"MAS Epoch {epoch+1}/{num_epochs} "
-                                     f"Loss: {running_loss/len(train_loader):.4f}")
-
-        # -------- 2. Book-keeping ---------------------------------------
-        history.append(running_loss / len(train_loader))
-
-        # optional: track how the latent space drifts over training
-        if len(dataset) > 0:
-            embeddings.append(get_latent_vectors(dataset=dataset, model=model))
-
-    # convert list → ndarray for easy plotting
-    embeddings = np.array(embeddings) if len(dataset) > 0 else embeddings
-    return history, embeddings, omega
 
 
 

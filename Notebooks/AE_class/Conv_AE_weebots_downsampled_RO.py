@@ -4,17 +4,26 @@ import numpy as np
 import seaborn as sb
 from tqdm import tqdm
 import matplotlib.pyplot as plt
-from matplotlib.ticker import MaxNLocator
+from collections import defaultdict
 from scipy.ndimage.filters import gaussian_filter
+
 
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
 import torch.optim as optim
-from torch.utils.data import DataLoader, TensorDataset
+import torch.nn.functional as F
+import torch.autograd as autograd
+from torch.utils.data import DataLoader, WeightedRandomSampler, TensorDataset, ConcatDataset
 
 
+def testing_img(image):
+    print(image.shape)
+    print(image)
 
+    image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+
+    print(image.shape)
+    print(image)
 
 def load_dataset(directory, file_format='.jpg'):
     '''
@@ -46,8 +55,16 @@ def load_dataset(directory, file_format='.jpg'):
 
 
 class Conv_AE(nn.Module):
-    def __init__(self, n_hidden=500, n_external=4):
-        super(Conv_AE, self).__init__()
+    def __init__(self, n_hidden=500):
+        #print('negative_slope = 0.001')
+        '''
+        Convolutional autoencoder in PyTorch, prepared to process images of shape (320,240,3). A sparsity constraint can be added to the middle layer.
+
+        Args:
+            n_hidden (int; default=100): number of hidden units in the middle layer.
+        '''
+        super().__init__()
+
         self.n_hidden = n_hidden
         self.dim1, self.dim2 = 15, 20
 
@@ -55,9 +72,8 @@ class Conv_AE(nn.Module):
         self.conv1 = nn.Conv2d(3, 16, kernel_size=3, stride=2, padding=1)
         self.conv2 = nn.Conv2d(16, 32, kernel_size=3, stride=2, padding=1)
         self.conv3 = nn.Conv2d(32, 64, kernel_size=3, stride=2, padding=1)
-        self.fc1 = nn.Linear(64 * self.dim1 * self.dim2 + n_external, n_hidden)
-        self.pred_ext_input = nn.Linear(n_hidden, n_external)
-
+        self.fc1 = nn.Linear(64 * self.dim1 * self.dim2, n_hidden)
+        
 
         # Decoder
         self.fc2 = nn.Linear(n_hidden, 64 * self.dim1 * self.dim2)
@@ -65,37 +81,36 @@ class Conv_AE(nn.Module):
         self.conv5 = nn.ConvTranspose2d(32, 16, kernel_size=3, stride=2, padding=1, output_padding=1)
         self.conv6 = nn.ConvTranspose2d(16, 3, kernel_size=3, stride=2, padding=1, output_padding=1)
 
-    def encoder(self, x, ext_input):
+    def encoder(self, x):
+        # Encoder
         x = F.relu(self.conv1(x))
         x = F.relu(self.conv2(x))
-        x = F.relu(self.conv3(x))
-        x = x.view(-1, 64 * self.dim1 * self.dim2)
-        # Concatenate external input to the flattened output before feeding to the linear layer
-        x = torch.cat((x, ext_input), dim=1)
+        x = F.relu(self.conv3(x))  
+        x = x.view(-1, 64 * self.dim1 * self.dim2)  
         x = F.relu(self.fc1(x))
-        pred_ext_input = F.relu(self.pred_ext_input(x))
-        return x, pred_ext_input
-
-    def decoder(self, x):
-        x = F.relu(self.fc2(x))
-        x = x.view(-1, 64, self.dim1, self.dim2)
-        x = F.relu(self.conv4(x))
-        x = F.relu(self.conv5(x))
-        x = torch.sigmoid(self.conv6(x))
+        
         return x
 
-    def forward(self, x, ext_input):
-        h, pred_ext_input = self.encoder(x, ext_input)
-        out = self.decoder(h)
-        return out, h, pred_ext_input
+    def decoder(self, x):
+        # Decoder
+        x = F.relu(self.fc2(x)) 
+        x = x.view(-1, 64, self.dim1, self.dim2) 
+        x = F.relu(self.conv4(x)) 
+        x = F.relu(self.conv5(x))  
+        x = torch.sigmoid(self.conv6(x))  
+        return x
 
-    def backward(self, optimizer, criterion, x, y_true, C_factor, alpha=0, ext_input=None):
+    def forward(self, x):
+        h = self.encoder(x)
+        out = self.decoder(h)
+        return out, h
+
+    def backward(self, optimizer, criterion, x, y_true,C_factor, alpha=0):
         optimizer.zero_grad()
 
-        y_pred, hidden, ext_input_pred = self.forward(x, ext_input)
+        y_pred, hidden = self.forward(x)
 
         recon_loss = criterion(y_pred, y_true)
-        recon_loss_ext_input = criterion(ext_input_pred, ext_input)
 
         # Whitening loss (batch whitening).
         hidden_constraint_loss = 0
@@ -105,110 +120,161 @@ class Conv_AE(nn.Module):
         M = torch.mm(hidden.t(), hidden)
 
         # Covariance matrix
+        #hidden_centered = hidden - torch.mean(hidden, dim=0, keepdim=True)
+        #M = torch.mm(hidden_centered.t(), hidden_centered) / (batch_size-1)
+        
         I = torch.eye(hidden_dim, device='cuda')
-        C = C_factor * I - M    # C = I - M    
-        hidden_constraint_loss = alpha * torch.norm(C) / (batch_size * hidden_dim)
-            
-        loss = recon_loss + hidden_constraint_loss + recon_loss_ext_input #*1000
+        C = C_factor*I - M    # C = I - M    
+        hidden_constraint_loss = alpha * torch.norm(C) / (batch_size*hidden_dim)
+        
+        loss = recon_loss + hidden_constraint_loss
         loss.backward()
 
         optimizer.step()
 
-        return recon_loss.item(), recon_loss_ext_input.item()
+        return recon_loss.item()
 
 
+    
 
-def create_dataloader(dataset, batch_size=256, reshuffle_after_epoch=True):
-    '''
-    Creates a DataLoader for Pytorch to train the autoencoder with the image data converted to a tensor.
 
-    Args:
-        dataset (4D numpy array): image dataset with shape (n_samples, n_channels, n_pixels_height, n_pixels_width).
-        batch_size (int; default=32): the size of the batch updates for the autoencoder training.
+def calculate_distances(positions, center):
+    distances = np.linalg.norm(positions - center, axis=1)
+    return distances
 
-    Returns:
-        DataLoader (Pytorch DataLoader): dataloader that is ready to be used for training an autoencoder.
-    '''
+def compute_probabilities(distances, decay_factor=1.0):
+    probabilities = np.exp(-decay_factor * distances)
+    probabilities /= probabilities.sum()  # Normalize to sum to 1
+    return probabilities
+
+def create_biased_dataloader(dataset, probabilities, batch_size=256):
     if dataset.shape[-1] <= 3:
         dataset = np.transpose(dataset, (0,3,1,2))
+    # Create a WeightedRandomSampler
+    sampler = WeightedRandomSampler(weights=probabilities, num_samples=len(probabilities), replacement=True)
+
+    # Convert images to a tensor dataset
     tensor_dataset = TensorDataset(torch.from_numpy(dataset).float(), torch.from_numpy(dataset).float())
-    return DataLoader(tensor_dataset, batch_size=batch_size, shuffle=reshuffle_after_epoch)
+
+    # Create DataLoader with the sampler
+    dataloader = DataLoader(tensor_dataset, batch_size=batch_size, sampler=sampler)
+
+    return dataloader
+
+def create_mixed_biased_dataloader(dataset, probabilities,
+                                   bias_ratio=0.5,     # fraction of extra biased samples
+                                   batch_size=256):
+    """
+    Creates a DataLoader where:
+      - Every image appears at least once per epoch.
+      - Images near the center appear more often overall.
+
+    Parameters
+    ----------
+    dataset : np.ndarray
+        Images, shape (N, H, W, C) or (N, C, H, W).
+    bias_ratio : float
+        Fraction of additional samples per epoch (0.0–1.0 typical).
+        e.g. 0.5 means add 50% more biased samples.
+    batch_size : int
+        Batch size for DataLoader.
+    """
+
+    N = len(dataset)
+    probs = torch.as_tensor(probabilities, dtype=torch.float32)
+
+    # --- Stage 1: uniform coverage (each sample once)
+    if dataset.ndim == 4 and dataset.shape[-1] in (1, 3):
+        dataset = np.transpose(dataset, (0, 3, 1, 2))
+    tensor_dataset = TensorDataset(torch.from_numpy(dataset).float(),
+                                   torch.from_numpy(dataset).float())
+
+    # --- Stage 2: biased oversampling ---
+    num_extra = int(bias_ratio * N)
+    if num_extra > 0:
+        sampler = WeightedRandomSampler(weights=probs,
+                                        num_samples=num_extra,
+                                        replacement=True)
+        # Create dataset copy for extra samples (same images, same targets)
+        biased_loader = DataLoader(tensor_dataset, batch_size=batch_size, sampler=sampler)
+        # We will concatenate later
+        extra_indices = list(iter(biased_loader.sampler))
+        extra_subset = torch.utils.data.Subset(tensor_dataset, extra_indices)
+        mixed_dataset = ConcatDataset([tensor_dataset, extra_subset])
+    else:
+        mixed_dataset = tensor_dataset
+
+    # --- Final DataLoader (uniform + biased extra samples) ---
+    dataloader = DataLoader(mixed_dataset, batch_size=batch_size, shuffle=True)
+
+    return dataloader
 
 
 
-def train_autoencoder(model, train_loader, external_inputs, C_factor, dataset=[], num_epochs=1000, learning_rate=1e-4, alpha=2e3):
+def train_autoencoder(model, train_loader, C_factor,  dataset=[], num_epochs=1000, learning_rate=1e-4, alpha=2e3):
+    '''
+    TO DO.
+    '''
     optimizer = optim.Adam(model.parameters(), lr=learning_rate)
     criterion = nn.MSELoss()
 
     model = model.to('cuda')
-    external_inputs=torch.Tensor(external_inputs).to('cuda')
 
     history = []
-    ext_history = []
     embeddings = []
     if len(dataset) > 0:
-        embeddings = [get_latent_vectors(dataset=dataset, model=model)]
+        embeddings = [ get_latent_vectors(dataset=dataset, model=model) ]
     for epoch in range(num_epochs):
         running_loss = 0.
-        running_ext_loss = 0.
         with tqdm(total=len(train_loader)) as pbar:
             for i, data in enumerate(train_loader, 0):
-                
-                inputs, _ = data #image
+                inputs, _ = data
                 inputs = inputs.to('cuda')
-                # Prepare external input for this batch
-                ext_inputs_batch = external_inputs[i * train_loader.batch_size: (i + 1) * train_loader.batch_size]
 
-                loss, ext_loss = model.backward(optimizer=optimizer, criterion=criterion, x=inputs, y_true=inputs, alpha=alpha, C_factor=C_factor, ext_input=ext_inputs_batch)
+                loss = model.backward(optimizer=optimizer, criterion=criterion, x=inputs, y_true=inputs, alpha=alpha, C_factor=C_factor)
                 running_loss += loss
-                running_ext_loss += ext_loss
 
                 pbar.update(1)
-                pbar.set_description(f"Epoch {epoch + 1}/{num_epochs}, Loss: {running_loss / len(train_loader):.4f}, Ext_loss: {running_ext_loss / len(train_loader):.4f}")
+                pbar.set_description(f"Epoch {epoch+1}/{num_epochs}, Loss: {running_loss/len(train_loader):.4f}")
 
-        history.append(running_loss / len(train_loader))
-        ext_history.append(running_ext_loss / len(train_loader))
+        history.append(running_loss/len(train_loader))
 
         if len(dataset) > 0:
-            embeddings.append(get_latent_vectors(dataset=dataset, model=model))
+            embeddings.append( get_latent_vectors(dataset=dataset, model=model) )
 
     embeddings = np.array(embeddings)
 
-    return history, embeddings, ext_history
+    return history, embeddings
 
 
 
-def predict(image, ext_input, model):
+
+
+
+def predict(image, model):
     '''
-    Returns the output of model(image) and model(ext_input), reshaping them to be compatible with plotting functions such as plt.imshow().
+    Returns the output of model(image), and reshapes it to be compatible with plotting funtions such as plt.imshow().
 
     Args:
         image (3D numpy array): sample image with shape (n_channels, n_pixels_height, n_pixels_width).
-        ext_input (list or numpy array): external input associated with the image, should be a list of 4 values.
         model (Pytorch Module): convolutional autoencoder that is prepared to process images such as 'image'.
 
     Returns:
-        output_img (3D numpy array): output image prediction with shape (n_pixels_height, n_pixels_width, n_channels).
-        output_ext_input (numpy array): output external input prediction.
+        output_img (3D numpy array): output image with shape (n_pixels_height, n_pixels_width, n_channels)
     '''
     if image.shape[-1] <= 4:
-        image = np.transpose(image, (2, 0, 1))
+        image = np.transpose(image, (2,0,1))
     n_channels, n_pixels_height, n_pixels_width = image.shape
     image = np.reshape(image, (1, n_channels, n_pixels_height, n_pixels_width))
     image = torch.from_numpy(image).float().to(next(model.parameters()).device)
-
-    ext_input = torch.Tensor(ext_input).float().unsqueeze(0).to(next(model.parameters()).device)
-    output_img, _, output_ext_input = model(image, ext_input)
-    output_img = output_img[0].detach().cpu().numpy()
-    output_img = np.transpose(output_img, (1, 2, 0))
-
-    output_ext_input = output_ext_input[0].detach().cpu().numpy()
+    output_img = model(image)[0].detach().cpu().numpy()
+    output_img = np.reshape(output_img, (n_channels, n_pixels_height, n_pixels_width))
+    output_img = np.transpose(output_img, (1,2,0))
+    return output_img
 
 
-    return output_img, output_ext_input
 
-
-def get_latent_vectors(dataset, ext_input, model, batch_size=256):
+def get_latent_vectors(dataset, model, batch_size=256):
     '''
     Returns the latent activation vectors of the autoencoder model after passing all the images in the dataset.
 
@@ -219,7 +285,6 @@ def get_latent_vectors(dataset, ext_input, model, batch_size=256):
     Returns:
         latent_vectors (2D numpy array): latent activation vectors, matrix with shape (n_samples, n_hidden), where n_hidden is the number of units in the hidden layer.
     '''
-    external_inputs=torch.Tensor(ext_input).to('cuda')
     if dataset.shape[-1] <= 4:
         dataset = np.transpose(dataset, (0,3,1,2))
     tensor_dataset = TensorDataset(torch.from_numpy(dataset).float(), torch.from_numpy(dataset).float())
@@ -228,13 +293,9 @@ def get_latent_vectors(dataset, ext_input, model, batch_size=256):
     model.to('cuda')
     latent_vectors = []
     with torch.no_grad():
-        # Divide external inputs into batches
-        ext_input_batches = [external_inputs[i * batch_size: (i + 1) * batch_size] for i in range(len(data_loader))]
-
-        for batch, ext_inputs_batch in zip(data_loader, ext_input_batches):
+        for batch in data_loader:
             inputs, _ = batch
-            inputs = inputs.to('cuda')
-            latent = model(inputs, ext_inputs_batch)[1]
+            latent = model(inputs.to('cuda'))[1]
             latent_vectors.append(latent.cpu().numpy())
     latent_vectors = np.concatenate(latent_vectors)
     return latent_vectors
@@ -292,25 +353,81 @@ def ratemaps(embeddings, position, n_bins=50, filter_width=2, occupancy_map=[], 
         ratemaps[i] = np.pad(ratemap_, ((n_bins_padding, n_bins_padding), (n_bins_padding, n_bins_padding)), mode='constant', constant_values=0)
         if np.any(ratemaps[i]):
             ratemaps[i] = np.abs(ratemaps[i])
-            ratemaps[i] = ratemaps[i]/np.max(ratemaps[i])
+            #ratemaps[i] = ratemaps[i]/np.max(ratemaps[i])
             ratemaps[i] = gaussian_filter(ratemaps[i], filter_width) 
-            ratemaps[i] = ratemaps[i]/np.max(ratemaps[i])
+            #ratemaps[i] = ratemaps[i]/np.max(ratemaps[i])
             ratemaps[i] = ratemaps[i].T
             if len(occupancy_map) > 0:
                 ratemaps[i] = ratemaps[i]/occ_prob
-                ratemaps[i] = ratemaps[i]/np.max(ratemaps[i])
+                #ratemaps[i] = ratemaps[i]/np.max(ratemaps[i])
         
     return ratemaps
 
 
+def evaluate_reconstruction_loss(model, dataset, batch_size=16):
+    '''
+    Evaluates the reconstruction loss (MSE) of a trained autoencoder on a given dataset.
 
-def plot_ratemaps(r, plot_path, plot_title, save=False):
+    Args:
+        model (torch.nn.Module): Trained autoencoder model.
+        dataset (numpy array): Dataset of images with shape (N, H, W, C) or (N, C, H, W).
+        batch_size (int): Batch size for evaluation.
+
+    Returns:
+        float: Average reconstruction loss (MSE) over the dataset.
+    '''
+
+    model.eval()
+    model.to('cuda')
+
+    # Ensure correct shape: (N, C, H, W)
+    if dataset.shape[-1] <= 4:
+        dataset = np.transpose(dataset, (0, 3, 1, 2))
+
+    tensor_dataset = TensorDataset(torch.from_numpy(dataset).float(), torch.from_numpy(dataset).float())
+    loader = DataLoader(tensor_dataset, batch_size=batch_size, shuffle=False)
+
+    criterion = nn.MSELoss(reduction='sum')  # sum to get total loss
+    total_loss = 0.0
+    total_samples = 0
+
+    with torch.no_grad():
+        for batch in loader:
+            x, _ = batch
+            x = x.to('cuda')
+            y_pred, _ = model(x)
+            total_loss += criterion(y_pred, x).item()
+            total_samples += x.shape[0] * x.shape[2] * x.shape[3] * x.shape[1]  # total number of pixels
+
+    avg_loss = total_loss / total_samples
+    return avg_loss
+
+def format_centroids(all_num_fields, centroids, sizes):
+    centroids_per_field = []
+    sizes_per_field = []
+    centroid_index = 0
+    
+    for i in range(len(all_num_fields)):
+
+        if all_num_fields[i] != 0:
+            centroids_append = centroids[centroid_index:centroid_index+all_num_fields[i]].tolist()
+            sizes_append = sizes[centroid_index:centroid_index+all_num_fields[i]].tolist()
+            centroid_index += all_num_fields[i]
+        else:
+            centroids_append = [[0, 0]]
+            sizes_append = [[0, 0]]
+
+
+        centroids_per_field.append(centroids_append)
+        sizes_per_field.append(sizes_append)
+    
+    return centroids_per_field, sizes_per_field
+
+def plot_ratemaps(r, plot_path, save=False):
     '''
     TO DO.
     '''
     plt.figure(figsize=(20,20), dpi=600)
-    plt.suptitle(plot_title, fontsize=50)
-    #plt.subplots_adjust(top=1.5)
     for i in range(100):
         plt.subplot(10, 10, i+1)
         plt.imshow(r[i], cmap='hot', origin='lower')
@@ -322,32 +439,18 @@ def plot_ratemaps(r, plot_path, plot_title, save=False):
     plt.show()
 
 
-def plot_motivational_ratemaps(r, plot_path, plot_title, motivation, save=False):
-    '''
-    TO DO.
-    '''
-    plt.figure(figsize=(10,10), dpi=600)
-    plt.suptitle(plot_title, fontsize=20)
-    for i in range(25):
-        plt.subplot(5, 5, i+1)
-        plt.title('Unit ' + str(i+1))
-        plt.imshow(r[i], cmap='hot', origin='lower')
-        plt.axis('off')
-    plt.tight_layout()
-    if save:
-        plt.savefig(plot_path + '/100ratemapsM' + str(motivation) + '.pdf', format='pdf', bbox_inches='tight')
-        plt.savefig(plot_path + '/100ratemapsM' + str(motivation) + '.png', format='png')
-    plt.show()
-
-
 def plot_single_ratemap_density(r, unit, all_num_fields, sizes_per_field, centroids_per_field, plot_path, figsize=(3,3), save=False):
     print('Number of place fields = ' + str(all_num_fields[unit]))
     print('Size of place fields = ' + str(sizes_per_field[unit]))
     print('YX position of place fields = ' + str(centroids_per_field[unit]))
 
     fig = plt.figure(figsize=figsize)
-    plt.imshow(r[unit], cmap='hot', origin='lower')
-    plt.title('Unit ' + str(unit + 1) )
+    im = plt.imshow(r[unit], cmap='hot', origin='lower')
+
+    # Colorbar
+    cbar = plt.colorbar(im, fraction=0.046, pad=0.04)
+    cbar.set_label('Activation', rotation=270, labelpad=12)
+    
     if centroids_per_field[unit] != [[[0, 0]]]:
         for i in range(len(centroids_per_field[unit])):
             plt.scatter(centroids_per_field[unit][i][1], centroids_per_field[unit][i][0], color='green', marker='x', s=30)
@@ -356,28 +459,68 @@ def plot_single_ratemap_density(r, unit, all_num_fields, sizes_per_field, centro
         fig.savefig(plot_path + '/Example_place_field.png', format='png')
     plt.show()
 
-def plot_motivational_single_ratemap(r1, r2, r3, r4, unit, plot_path, figsize=(6,6), save=False):
 
-    fig = plt.figure(figsize=figsize)
-    plt.suptitle('Motivational ratemps for unit ' + str(unit + 1), fontsize=15)
-    plt.subplot(221)
-    plt.imshow(r1[unit], cmap='hot', origin='lower')
-    plt.title('Motivation 1')
-    plt.subplot(222)
-    plt.imshow(r2[unit], cmap='hot', origin='lower')
-    plt.title('Motivation 2')
-    plt.subplot(223)
-    plt.imshow(r3[unit], cmap='hot', origin='lower')
-    plt.title('Motivation 3')
-    plt.subplot(224)
-    plt.imshow(r4[unit], cmap='hot', origin='lower')
-    plt.title('Motivation 4')
-   
+def polarmaps(embeddings, angles, n_bins=20):
+    '''
+    Creates polarmaps from embedding activity and angle orientation through time.
+
+    Args:
+        embeddings (2D numpy array): 2D matrix latent embeddings through time, with shape (n_samples, n_latent).
+        angles (list or 1D numpy array): list or 1D array containing the orientation angle (in radians or degrees) through 
+                                         time, with shape (n_samples,).
+        n_bins (int; default=20): resolution of the discretization of angles from which the polarmaps will be computed.
+
+    Returns:
+        polarmaps (2D numpy array): 2D matrix containing the polarmaps associated to all embedding units, with 
+                                    shape (n_latent, n_bins).
+    '''
+    # Normalize orientation with respect to resolution to convert orientation to polarmap indices
+    orien_imgs_norm = np.copy(angles)
+    orien_imgs_norm = orien_imgs_norm/np.max(orien_imgs_norm)
+    orien_imgs_norm = orien_imgs_norm*n_bins
+    orien_imgs_norm = orien_imgs_norm.astype(int)
+    
+    # Add activation values to each cell in the ratemap and adds Gaussian smoothing
+    n_latent = embeddings.shape[1]
+    polarmaps = np.zeros((n_latent, n_bins))
+    for i in range(n_latent):
+        for ii, c in enumerate(embeddings[:,i]):
+            indx = orien_imgs_norm[ii]
+            polarmaps[i, indx-1] += c
+        if np.any(polarmaps[i]):
+            polarmaps[i] = polarmaps[i]/np.max(polarmaps[i])
+        
+    return polarmaps
+
+
+def plot_polarmaps(p, plot_path, n_bins=20, n_cells_plot=30, save=False):
+    '''
+    TO DO.
+    '''
+    plt.figure(figsize=(20,16), dpi=600)
+    
+    for i in range(n_cells_plot):
+
+        bottom = 0.4
+
+        theta = np.linspace(0.0, 2*np.pi, n_bins, endpoint=False)
+        radii = p[i]
+        width = (2*np.pi) / (n_bins-1)
+
+        ax = plt.subplot(5,6,i+1, polar=True)
+        plt.title('Unit '+str(i+1))
+        bars = ax.bar(theta, radii, width=width, bottom=bottom)
+        ax.set_theta_zero_location("W")
+
+        for r, bar in zip(radii, bars):
+            bar.set_facecolor(plt.cm.jet(r / 5.))
+            bar.set_alpha(0.8)
+
+    plt.tight_layout()
     if save:
-        fig.savefig(plot_path + '/motivational_single_ratemaps.pdf', format='pdf', bbox_inches='tight')
-        fig.savefig(plot_path + '/motivational_single_ratemaps.png', format='png')
+        plt.savefig(plot_path + '/Polar_maps.pdf', format='pdf', bbox_inches='tight')
+        plt.savefig(plot_path + '/Polar_maps.png', format='png')
     plt.show()
-
 
 def stats_place_fields(ratemaps, peak_as_centroid=True, min_pix_cluster=0.02, max_pix_cluster=0.5, active_threshold=0.2):
     '''
@@ -498,7 +641,6 @@ def plot_place_field_hist(num_fields, plot_path, save=False):
     plt.bar(np.arange(np.max(num_fields)+1), place_field_counts, width=1, color='black', alpha=1, edgecolor='white')
     plt.xlabel('# place fields', fontsize=20)
     plt.ylabel('prob.', fontsize=20)
-    plt.title('Place field probability', fontsize=20)
     plt.yticks(np.linspace(0,1,6), np.linspace(0,1,6).round(1), fontsize=18)
     plt.xticks(np.linspace(0, np.max(num_fields), np.max(num_fields)+1, dtype=int), np.linspace(0, np.max(num_fields), np.max(num_fields)+1, dtype=int), fontsize=18)
     plt.ylim(0,1)
@@ -507,109 +649,4 @@ def plot_place_field_hist(num_fields, plot_path, save=False):
     if save:
         plt.savefig(plot_path + '/prob_place_field_histogram.pdf', format='pdf', bbox_inches='tight')
         plt.savefig(plot_path + '/prob_place_field_histogram.png', format='png')
-    plt.show()
-
-
-def format_centroids(all_num_fields, centroids, sizes):
-    centroids_per_field = []
-    sizes_per_field = []
-    centroid_index = 0
-    
-    for i in range(len(all_num_fields)):
-
-        if all_num_fields[i] != 0:
-            centroids_append = centroids[centroid_index:centroid_index+all_num_fields[i]].tolist()
-            sizes_append = sizes[centroid_index:centroid_index+all_num_fields[i]].tolist()
-            centroid_index += all_num_fields[i]
-        else:
-            centroids_append = []
-            sizes_append = []
-
-
-        centroids_per_field.append(centroids_append)
-        sizes_per_field.append(sizes_append)
-    
-    return centroids_per_field, sizes_per_field
-
-
-def plot_centroid_hist(centroids_per_field, plot_path, save=False):
-    max_centroids = 0
-    for i in range(len(centroids_per_field)):
-        if len(centroids_per_field[i]) > max_centroids:
-            max_centroids = len(centroids_per_field[i])
-
-    centroid_distribution = []
-
-    for i in range(max_centroids+1):
-        count=0
-        for a in range(len(centroids_per_field)):
-            if len(centroids_per_field[a]) == i:
-                count += 1
-        centroid_distribution.append(count)
-
-    total_values = sum(centroid_distribution)
-    centroid_percentage = np.array(centroid_distribution) / total_values * 100
-    indices = range(len(centroid_percentage))
-
-    plt.figure(figsize=(8, 6))
-    plt.bar(indices, centroid_percentage, color='black')
-    plt.xlabel('Num. of centroids', size=12)
-    plt.ylabel('Percentage of units', size=12)
-    plt.title('Distribution of place fields per unit', size=15)
-    plt.grid(axis='y', linestyle='--', alpha=0.7)
-    x_labels = list(indices)
-    plt.xticks(indices, x_labels)
-    if save:
-        plt.savefig(plot_path + '/centroids_histogram.pdf', format='pdf', bbox_inches='tight')
-        plt.savefig(plot_path + '/centroids_histogram.png', format='png')
-    plt.show()
-
-
-def plot_place_field_sizes_hist(sizes_per_field, plot_path, bins=6, save=False):
-    sizes = []
-    for i in range(len(sizes_per_field)):
-        for a in range(len(sizes_per_field[i])):
-            sizes.append(sizes_per_field[i][a])
-
-    plt.figure(figsize=(8, 6))
-    plt.hist(sizes, weights=np.ones(len(sizes)) / len(sizes), bins=bins, color='black')
-
-    plt.xlabel('Place field size', size=12)
-    plt.ylabel('Percentage of units', size=12)
-    plt.title('Distribution of place fields sizes', size=15)
-    plt.grid(axis='y', linestyle='--', alpha=0.7)
-    
-    #X Ticks
-    max_value = max(sizes)
-    size_ticks = []
-    for i in range(bins):
-        size_ticks.append(round(((max_value/bins) *i)  + (max_value/(bins*2))))    
-    plt.xticks(size_ticks)
-    
-    if save:
-        plt.savefig(plot_path + '/PF_size_histogram.pdf', format='pdf', bbox_inches='tight')
-        plt.savefig(plot_path + '/PF_size_histogram.png', format='png')
-    plt.show()
-
-
-def raster_plot(unit_activation, title=''):
-    # Create a figure with desired figsize
-    fig, ax0 = plt.subplots(1, 1, figsize=(12, 6))
-
-    # Plot the data with pcolor and set the vmax parameter
-    c = ax0.pcolor(unit_activation, cmap='hot', vmax=1.)
-
-    # Add color bar with an arbitrary maximum value of 1.5
-    cbar = plt.colorbar(c, ax=ax0)
-    cbar.set_label('Norm. Unit Actv.')  # Set the label of the color bar
-
-    # Set title
-    ax0.set_title('Raster plot for ' + title, fontsize=15, fontweight="bold")
-    ax0.set_ylabel('Sorted Units')
-    ax0.yaxis.set_major_locator(MaxNLocator(integer=True))
-
-    # Tight layout
-    fig.tight_layout()
-
-    # Show the plot
     plt.show()
