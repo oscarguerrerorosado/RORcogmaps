@@ -136,6 +136,27 @@ class Conv_AE(nn.Module):
 
 
     
+def create_dataloader(dataset, batch_size=256, reshuffle_after_epoch=True):
+    '''
+    Creates a DataLoader for Pytorch to train the autoencoder with the image data converted to a tensor.
+
+    Args:
+        dataset (4D numpy array): image dataset with shape (n_samples, n_channels, n_pixels_height, n_pixels_width).
+        batch_size (int; default=32): the size of the batch updates for the autoencoder training.
+
+    Returns:
+        DataLoader (Pytorch DataLoader): dataloader that is ready to be used for training an autoencoder.
+    '''
+    if dataset.shape[-1] <= 3:
+        '''print("PREV TRANSFORMATION")
+        print("dataset.shape-------->", dataset.shape)
+        print("dataset.shape[-1]---->", dataset.shape[-1])'''
+        dataset = np.transpose(dataset, (0,3,1,2))
+        '''print("POST TRANSFORMATION")
+        print("dataset.shape-------->", dataset.shape)
+        print("dataset.shape[-1]---->", dataset.shape[-1])'''
+    tensor_dataset = TensorDataset(torch.from_numpy(dataset).float(), torch.from_numpy(dataset).float())
+    return DataLoader(tensor_dataset, batch_size=batch_size, shuffle=reshuffle_after_epoch)
 
 
 def calculate_distances(positions, center):
@@ -179,35 +200,33 @@ def create_mixed_biased_dataloader(dataset, probabilities,
     batch_size : int
         Batch size for DataLoader.
     """
-
+    
     N = len(dataset)
     probs = torch.as_tensor(probabilities, dtype=torch.float32)
-
+    
     # --- Stage 1: uniform coverage (each sample once)
     if dataset.ndim == 4 and dataset.shape[-1] in (1, 3):
         dataset = np.transpose(dataset, (0, 3, 1, 2))
     tensor_dataset = TensorDataset(torch.from_numpy(dataset).float(),
                                    torch.from_numpy(dataset).float())
-
+    
     # --- Stage 2: biased oversampling ---
     num_extra = int(bias_ratio * N)
     if num_extra > 0:
-        sampler = WeightedRandomSampler(weights=probs,
-                                        num_samples=num_extra,
-                                        replacement=True)
+        sampler = WeightedRandomSampler(weights=probs, num_samples=num_extra, replacement=True)
+        
         # Create dataset copy for extra samples (same images, same targets)
         biased_loader = DataLoader(tensor_dataset, batch_size=batch_size, sampler=sampler)
-        # We will concatenate later
         extra_indices = list(iter(biased_loader.sampler))
         extra_subset = torch.utils.data.Subset(tensor_dataset, extra_indices)
         mixed_dataset = ConcatDataset([tensor_dataset, extra_subset])
     else:
         mixed_dataset = tensor_dataset
-
-    # --- Final DataLoader (uniform + biased extra samples) ---
+        extra_indices = []
+    
+    # --- Final DataLoader (uniform + biased extra samples) --
     dataloader = DataLoader(mixed_dataset, batch_size=batch_size, shuffle=True)
-
-    return dataloader
+    return dataloader, extra_indices
 
 
 
@@ -302,7 +321,7 @@ def get_latent_vectors(dataset, model, batch_size=256):
 
 
 
-def ratemaps(embeddings, position, n_bins=50, filter_width=2, occupancy_map=[], n_bins_padding=0):
+def ratemaps(embeddings, position, n_bins=50, filter_width=2, occupancy_map=[], n_bins_padding=0, normalize=True):
     '''
     Creates smooth ratemaps from latent embeddings (activity) and spatial position through time.
 
@@ -359,7 +378,8 @@ def ratemaps(embeddings, position, n_bins=50, filter_width=2, occupancy_map=[], 
             ratemaps[i] = ratemaps[i].T
             if len(occupancy_map) > 0:
                 ratemaps[i] = ratemaps[i]/occ_prob
-                #ratemaps[i] = ratemaps[i]/np.max(ratemaps[i])
+            if normalize == True:
+                ratemaps[i] = ratemaps[i]/np.max(ratemaps[i])
         
     return ratemaps
 
