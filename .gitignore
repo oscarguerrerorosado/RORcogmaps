@@ -1,3 +1,28 @@
+# Data and outputs
 Datasets/
 Models/
 Plots/
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyc
+*.d
+*.o
+
+# Jupyter
+.ipynb_checkpoints/
+
+# Windows
+*:Zone.Identifier
+*.Zone.Identifier
+
+# Environments
+.env
+.venv
+env/
+venv/
+
+# IDE
+.idea/
+.vscode/
