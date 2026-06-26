@@ -47,8 +47,8 @@ Analysis of how reward overrepresentation alters the geometric structure of the 
 RORcogmaps/
 ├── Notebooks/
 │   ├── AE_class/
-│   │   ├── Conv_AE_weebots_downsampled.py          # Base autoencoder
-│   │   └── Conv_AE_weebots_downsampled_RO.py       # Reward-biased autoencoder
+│   │   ├── Conv_AE_Webots.py          # Base autoencoder
+│   │   └── Conv_AE_Webots_ROR.py      # Reward-biased autoencoder
 │   │
 │   ├── Experiment 1. Tmaze serial training/
 │   │   ├── serial_train_autoencoder.ipynb
