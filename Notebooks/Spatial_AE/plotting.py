@@ -796,3 +796,94 @@ def plot_example_ratemaps_progress(example_units, example_ratemaps, figsize=(15,
         else:
             fig.savefig(path + '/example_units.pdf', format='pdf', bbox_inches='tight')
             fig.savefig(path + '/example_units.png', format='png')
+
+#####################################################################################################
+
+def plot_occupancy_map(XYposition, plot_folder, save=False):
+    x_array = XYposition[:, 0]
+    y_array = XYposition[:, 1]
+    x_bins = 40
+    y_bins = 40
+    figsize = (7, 6)
+
+    xedges = np.linspace(np.min(x_array), np.max(x_array), x_bins + 1)
+    yedges = np.linspace(np.min(y_array), np.max(y_array), y_bins + 1)
+
+    fig, ax = plt.subplots(figsize=figsize)
+    ax.set_aspect("auto")
+
+    hist, xedges, yedges, im = ax.hist2d(x_array, y_array, bins=[xedges, yedges])
+
+    cbar = fig.colorbar(im)
+    cbar.set_label('Normal timesteps', rotation=270, fontsize=15, labelpad=25)
+
+    ax.set_title('DoubleTmaze occupancy map', fontsize=15)
+    ax.set_xticks(np.arange(np.min(x_array), np.max(x_array), step=.5))
+    ax.set_yticks(np.arange(np.min(y_array), np.max(y_array), step=.25))
+
+    plt.show()
+    if save:
+        fig.savefig(plot_folder + '/Occupancy_map.pdf', format='pdf', bbox_inches='tight')
+        fig.savefig(plot_folder + '/Occupancy_map.png', format='png')
+
+    return hist
+
+#####################################################################################################
+
+def plot_agent_trajectory(XYposition, plot_folder, save=False):
+
+    obstacle1x =[-1.22, -1.22, -.45, -.45, -1.1, -1.1, -.45, -.45, -1.22, -1.22, -.07, -.07, .07, .07, 1.22, 1.22, .45,
+                .45, 1.1, 1.1, .45, .45, 1.22, 1.22, .07, .07, -.07, -.07, -1.22]
+    obstacle1y =[-1.2, -.8, -.8, -.7, -.7, .7, .7, .8, .8, 1.2, 1.2, .75, .75, 1.2, 1.2, .8, .8, .7, .7, -.7, -.7, 
+                -.8, -.8, -1.2, -1.2, -.75, -.75, -1.2, -1.2]
+    obstacle2x = [-.4, -.4, .4, .4, -.4]
+    obstacle2y = [-.35, -.2, -.2, -.35, -.35]
+    obstacle3x = [-.4, -.4, .4, .4, -.4]
+    obstacle3y = [.35, .2, .2, .35, .35]
+    obstaclesx = [obstacle1x, obstacle2x,obstacle3x]
+    obstaclesy = [obstacle1y, obstacle2y,obstacle3y]
+
+    figsize=(7, 6) 
+    fig = plt.figure(figsize=figsize)
+
+    for i in range(len(obstaclesx)):
+        plt.plot(obstaclesx[i], obstaclesy[i], linewidth=3, color='grey')
+
+    x_array = XYposition[:, 0]
+    y_array = XYposition[:, 1]
+
+    plt.plot(x_array, y_array, linewidth=0.2)
+    plt.yticks(np.arange(-2, 2, step=.2), fontsize=10)
+    plt.xticks(np.arange(-2, 2, step=.2), fontsize=10)
+    plt.title("Agent's trajectory", fontsize=30)
+    plt.plot(x_array[0],y_array[0],'ro', markersize=10)
+    plt.show()
+    
+    if save:
+        fig.savefig(plot_folder + '/Trajectory.pdf', format='pdf', bbox_inches='tight')
+        fig.savefig(plot_folder + '/Trajectory.png', format='png')
+
+#####################################################################################################
+
+def plot_samples_per_bin_hist(hist, descending=True):
+    counts = hist.flatten()
+
+    # keep only visited bins (drop the zeros outside the maze arms)
+    counts = counts[counts > 0]
+
+    order = np.argsort(counts)
+    if descending:
+        order = order[::-1]
+    counts = counts[order]
+
+    fig, ax = plt.subplots(figsize=(8, 5))
+    ax.bar(range(len(counts)), counts, color='steelblue',
+           edgecolor='white', linewidth=0.3)
+
+    ax.set_title('Occupancy per spatial bin', fontsize=14)
+    ax.set_xlabel('Spatial bin (ordered by occupancy)')
+    ax.set_ylabel('Num. samples')
+    ax.spines[['top', 'right']].set_visible(False)
+
+    plt.tight_layout()
+    plt.show()

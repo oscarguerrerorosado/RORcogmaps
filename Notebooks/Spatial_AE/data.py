@@ -82,6 +82,24 @@ def update_data(csv_filename):
 
 #####################################################################
 
+def check_missing_frame(dataframe):
+    img_idx = 1
+    frames_to_remove = []
+    for i in range(len(dataframe['Frame_ID'])):    
+        if dataframe['Frame_ID'][i] != i+img_idx:
+            frames_to_remove.append(i)
+            img_idx += 1
+    print("Frames ID to be removed from dataset =", frames_to_remove)
+    return frames_to_remove
+
+#####################################################################
+
+def clean_dataset(dataset, frames_to_remove):
+    dataset = np.delete(dataset, frames_to_remove, axis=0)
+    return dataset
+
+#####################################################################
+
 def update_model_trial(control, experiment_n, env, trial, model_filename, foldername, folder_path, n_hidden):
     # Update model name for trial t
     if control == True:
