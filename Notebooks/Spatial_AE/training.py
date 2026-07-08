@@ -132,3 +132,28 @@ def evaluate_reconstruction_loss(model, dataset, batch_size=16):
     avg_loss = total_loss / total_samples
     return avg_loss
 #####################################################################
+
+def img_reconstruction_loss(model, image, criterion=nn.MSELoss()):
+    model.eval()
+    model.to('cuda')
+    with torch.no_grad():
+        if image.shape[-1] <= 4:
+            image = np.transpose(image, (2, 0, 1))
+        n_channels, h, w = image.shape
+        image_tensor = torch.from_numpy(image).float().reshape(1, n_channels, h, w).to(next(model.parameters()).device)
+        output = model(image_tensor)[0]  # take first element of tuple
+        loss = criterion(output, image_tensor)
+    return loss.item()
+#####################################################################
+
+def img_pixelwise_reconstruction_loss(model, image):
+    model.eval()
+    with torch.no_grad():
+        if image.shape[-1] <= 4:
+            image = np.transpose(image, (2, 0, 1))
+        n_channels, h, w = image.shape
+        image_tensor = torch.from_numpy(image).float().reshape(1, n_channels, h, w).to(next(model.parameters()).device)
+        output = model(image_tensor)[0]
+        error_map = ((output - image_tensor) ** 2).squeeze(0).mean(0)  # average over channels
+    return error_map.cpu().numpy()
+#####################################################################

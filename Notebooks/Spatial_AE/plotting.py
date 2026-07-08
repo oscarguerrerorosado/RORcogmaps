@@ -2,6 +2,7 @@ import numpy as np
 import seaborn as sb
 import matplotlib.cm as cm
 import matplotlib.pyplot as plt
+from scipy.stats import binned_statistic_2d
 
 
 from training import predict
@@ -887,3 +888,51 @@ def plot_samples_per_bin_hist(hist, descending=True):
 
     plt.tight_layout()
     plt.show()
+
+#####################################################################################################
+
+def value_heatmap(XYposition, values, title="", plot_path="", save=False):
+    x_array = XYposition[:, 0]
+    y_array = XYposition[:, 1]
+    x_bins = 40
+    y_bins = 40
+    figsize = (7, 6)
+
+    xedges = np.linspace(np.min(x_array), np.max(x_array), x_bins + 1)
+    yedges = np.linspace(np.min(y_array), np.max(y_array), y_bins + 1)
+
+    # Average value per bin instead of counting
+    stat, xedges, yedges, _ = binned_statistic_2d(
+        x_array, y_array, values, statistic='mean', bins=[xedges, yedges]
+    )
+
+    occupancy, _, _, _ = binned_statistic_2d(x_array, y_array, None, statistic='count', bins=[xedges, yedges])
+    stat[occupancy < 5] = np.nan
+
+    fig, ax = plt.subplots(figsize=figsize)
+    ax.set_aspect('auto')
+
+    vmax = np.nanmax(np.abs(stat))  # symmetric colorscale
+    im = ax.imshow(
+        stat.T, origin='lower',
+        extent=[xedges[0], xedges[-1], yedges[0], yedges[-1]],
+        aspect='auto',
+        cmap='RdBu_r',  # blue=negative, red=positive
+        vmin=-vmax, vmax=vmax
+    )
+
+    cbar = fig.colorbar(im, ax=ax)
+    cbar.set_label('Relative value (with respect the mean)', rotation=270, fontsize=15, labelpad=25)
+    ax.set_title(title, fontsize=15)
+    plt.show()
+
+    filename = title.replace(" ", "").replace(".", "")
+
+    if save:
+        if plot_path == "":
+            print("Plot path is not defined")
+        else:
+            fig.savefig(plot_path + '/' + filename + '.pdf', format='pdf', bbox_inches='tight')
+            fig.savefig(plot_path + '/' + filename + '.png', format='png')
+    
+    return stat
