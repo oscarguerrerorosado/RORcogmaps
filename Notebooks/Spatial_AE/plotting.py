@@ -2,6 +2,7 @@ import numpy as np
 import seaborn as sb
 import matplotlib.cm as cm
 import matplotlib.pyplot as plt
+from scipy.ndimage import gaussian_filter
 from scipy.stats import binned_statistic_2d
 
 
@@ -936,3 +937,42 @@ def value_heatmap(XYposition, values, title="", plot_path="", save=False):
             fig.savefig(plot_path + '/' + filename + '.png', format='png')
     
     return stat
+
+
+def change_heatmap(values, title="", cbar_lim=None, cbar_label="∆ value", save=False, plot_path=''):
+    figsize = (7, 6)
+    fig, ax = plt.subplots(figsize=figsize)
+    ax.set_aspect('auto')
+
+    filled = np.nan_to_num(values, nan=0.0)
+    smoothed = gaussian_filter(filled, sigma=2)
+    smoothed[np.isnan(values)] = np.nan
+
+    vmax_value = np.nanmax(np.abs(smoothed))  # symmetric colorscale
+    
+    if cbar_lim == None:
+        print("Max. absolute value =", vmax_value)
+        cbar_lim = vmax_value
+    
+    im = ax.imshow(
+        smoothed.T, origin='lower',
+        aspect='auto',
+        cmap='RdBu_r',  # blue=negative, red=positive
+        vmin=-cbar_lim, vmax=cbar_lim
+    )
+
+    cbar = fig.colorbar(im, ax=ax)
+    cbar.set_label(cbar_label, rotation=270, fontsize=15, labelpad=25)
+    ax.set_title(title, fontsize=15)
+    plt.show()
+
+    filename = title.replace(" ", "").replace(".", "")
+
+    if save:
+        if plot_path == "":
+            print("Plot path is not defined")
+        else:
+            fig.savefig(plot_path + '/' + filename +'.pdf', format='pdf', bbox_inches='tight')
+            fig.savefig(plot_path + '/' + filename +'.png', format='png')
+
+    return vmax_value

@@ -8,31 +8,20 @@ import pandas as pd
 from model import *
 
 def load_dataset(directory, file_format='.jpg'):
-    '''
-    Loads all .jpg images and the pose data per image from a given directory.
+    filenames = [f for f in sorted(os.listdir(directory)) if f.endswith(file_format)]
+    if not filenames:
+        raise ValueError(f"No {file_format} files found in {directory}")
 
-    Args:
-        directory (str): path to the images to be loaded.
-        file_format (str): format of the images. Accepted formats are .npy and .jpg.
-        load_pose (bool): if True, it will also load the pose data.
-        pose_filename (str): name of the file with the pose data. The accepted format is .npy.
+    # read one image to get the shape
+    first = cv2.cvtColor(cv2.imread(os.path.join(directory, filenames[0])), cv2.COLOR_BGR2RGB)
+    h, w, c = first.shape
 
-    Returns:
-        images (4D numpy array): image dataset with shape (n_samples, n_channels, n_pixels_height, n_pixels_width) and normalized values [0,1].
-        pose (2D numpy array): pose data with (x,y) coordinates and angle (in degrees; [0,360]), wit shape (n_samples, 3).
-    '''
-    images = []
-    for i, filename in enumerate(sorted(os.listdir(directory))):
-        if filename.endswith(file_format):
-            filepath = os.path.join(directory, filename)
-            image = cv2.imread(filepath)
-            image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
-            images.append(image)
-    images = np.array(images)
+    images = np.empty((len(filenames), h, w, c), dtype=np.float32)
+    for i, filename in enumerate(filenames):
+        img = cv2.imread(os.path.join(directory, filename))
+        images[i] = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
 
-    if np.max(images) > 1:   # normalize to [0,1] if values are RGB [0,255].
-        images = images/255.
-
+    images /= np.float32(255.0)
     return images
 #####################################################################
 

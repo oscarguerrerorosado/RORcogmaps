@@ -82,9 +82,9 @@ RORcogmaps/
     ├── Tmaze_0/
     ├── Tmaze_1/
     ├── Tmaze_2/
-    ├── Tmaze_old1/
-    ├── Tmaze_old2/
-    ├── Tmaze_old3/
+    ├── Tmaze_v0a/
+    ├── Tmaze_v0b/
+    ├── Tmaze_v0c/
     ├── DoubleTmazeNoReward/
     ├── DoubleTmazeNoReward2/
     └── DoubleTmazeWithReward/
