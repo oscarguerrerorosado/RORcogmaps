@@ -288,3 +288,14 @@ def compute_mean_std(data):
     mean = arr.mean(axis=0)     # shape (301,)
     std  = arr.std(axis=0)      # shape (301,)
     return mean, std
+#####################################################################
+
+def calculate_distances(positions, center):
+    distances = np.linalg.norm(positions - center, axis=1)
+    return distances
+    
+#####################################################################
+def compute_probabilities(distances, decay_factor=1.0):
+    probabilities = np.exp(-decay_factor * distances)
+    probabilities /= probabilities.sum()  # Normalize to sum to 1
+    return probabilities
