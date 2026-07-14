@@ -1,7 +1,7 @@
 import numpy as np
 from scipy.ndimage.filters import gaussian_filter
 
-def ratemaps(embeddings, position, n_bins=50, filter_width=2, occupancy_map=[], n_bins_padding=0):
+def ratemaps(embeddings, position, n_bins=50, filter_width=2, occupancy_map=[], n_bins_padding=0, normalize=True):
     '''
     Creates smooth ratemaps from latent embeddings (activity) and spatial position through time.
 
@@ -55,6 +55,8 @@ def ratemaps(embeddings, position, n_bins=50, filter_width=2, occupancy_map=[], 
             ratemaps[i] = ratemaps[i].T
             if len(occupancy_map) > 0:
                 ratemaps[i] = ratemaps[i]/occ_prob
+            if normalize == True:
+                ratemaps[i] = ratemaps[i]/np.max(ratemaps[i])
         
     return ratemaps
 
